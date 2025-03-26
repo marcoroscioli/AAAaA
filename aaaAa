@@ -1,0 +1,594 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D Flight Simulator with Infinite Terrain</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            font-family: Arial, sans-serif;
+        }
+        #gameCanvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+        }
+        #hud {
+            position: absolute;
+            color: white;
+            padding: 20px;
+            font-family: monospace;
+            background-color: rgba(0, 0, 0, 0.3);
+            border-radius: 5px;
+            left: 10px;
+            top: 10px;
+        }
+        #instructions {
+            position: absolute;
+            bottom: 20px;
+            left: 0;
+            width: 100%;
+            color: white;
+            text-align: center;
+            background-color: rgba(0, 0, 0, 0.5);
+            padding: 10px 0;
+        }
+    </style>
+</head>
+<body>
+    <div id="gameCanvas"></div>
+    <div id="hud">
+        <div>Speed: <span id="speed">0</span> knots</div>
+        <div>Altitude: <span id="altitude">0</span> feet</div>
+        <div>Heading: <span id="heading">0</span>°</div>
+        <div>Pitch: <span id="pitch">0</span>°</div>
+        <div>Roll: <span id="roll">0</span>°</div>
+        <div>X: <span id="x-coord">0</span> | Z: <span id="z-coord">0</span></div>
+        <div>Active Chunks: <span id="chunks">0</span></div>
+    </div>
+    <div id="instructions">
+        Controls: W/S to pitch up/down | A/D to roll left/right | Q/E to yaw left/right | Shift/Ctrl to increase/decrease speed
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/simplex-noise/2.4.0/simplex-noise.min.js"></script>
+    <script>
+        // Main variables
+        const container = document.getElementById('gameCanvas');
+        
+        // HUD elements
+        const speedElement = document.getElementById('speed');
+        const altitudeElement = document.getElementById('altitude');
+        const headingElement = document.getElementById('heading');
+        const pitchElement = document.getElementById('pitch');
+        const rollElement = document.getElementById('roll');
+        const xCoordElement = document.getElementById('x-coord');
+        const zCoordElement = document.getElementById('z-coord');
+        const chunksElement = document.getElementById('chunks');
+        
+        // Three.js setup
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 20000);
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setClearColor(0x87CEEB); // Sky blue
+        container.appendChild(renderer.domElement);
+        
+        // Handle window resize
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+        
+        // Aircraft model
+        const aircraft = {
+            object: new THREE.Group(),
+            velocity: new THREE.Vector3(0, 0, -10), // Initial forward velocity
+            speed: 100,
+            maxSpeed: 600,
+            minSpeed: 60,
+            rotationMatrix: new THREE.Matrix4(),
+            eulerRotation: new THREE.Euler(0, 0, 0, 'YXZ'),
+            update: function(deltaTime) {
+                // Convert to seconds
+                const dt = deltaTime / 1000;
+                
+                // Update position based on velocity
+                this.object.position.add(this.velocity.clone().multiplyScalar(dt));
+                
+                // Apply rotation
+                this.object.setRotationFromMatrix(this.rotationMatrix);
+                
+                // Update velocity based on aircraft orientation
+                this.velocity.set(0, 0, -this.speed);
+                this.velocity.applyMatrix4(this.rotationMatrix);
+                
+                // Update HUD
+                speedElement.textContent = Math.round(this.speed);
+                altitudeElement.textContent = Math.round(this.object.position.y);
+                xCoordElement.textContent = Math.round(this.object.position.x);
+                zCoordElement.textContent = Math.round(this.object.position.z);
+                
+                // Calculate heading (0-360 degrees)
+                let heading = (Math.atan2(this.velocity.x, this.velocity.z) * 180 / Math.PI);
+                if (heading < 0) heading += 360;
+                headingElement.textContent = Math.round(heading);
+                
+                // Calculate pitch and roll from the euler rotation
+                const pitchDeg = (this.eulerRotation.x * 180 / Math.PI);
+                const rollDeg = (this.eulerRotation.z * 180 / Math.PI);
+                pitchElement.textContent = Math.round(pitchDeg);
+                rollElement.textContent = Math.round(rollDeg);
+                
+                // Check for terrain updates
+                terrainManager.update(this.object.position);
+                
+                // Get terrain height at aircraft position
+                const terrainHeight = terrainManager.getTerrainHeight(this.object.position.x, this.object.position.z);
+                
+                // Prevent going below ground
+                if (this.object.position.y < terrainHeight + 20) {
+                    this.object.position.y = terrainHeight + 20;
+                    if (this.velocity.y < 0) {
+                        this.velocity.y = 0;
+                    }
+                }
+            }
+        };
+        
+        // Create a simple aircraft model
+        function createAircraftModel() {
+            // Fuselage
+            const fuselage = new THREE.Mesh(
+                new THREE.CylinderGeometry(1, 1, 10, 8),
+                new THREE.MeshLambertMaterial({ color: 0xCCCCCC })
+            );
+            fuselage.rotation.x = Math.PI / 2;
+            fuselage.position.z = 0;
+            aircraft.object.add(fuselage);
+            
+            // Wings
+            const wingGeometry = new THREE.BoxGeometry(12, 0.5, 3);
+            const wing = new THREE.Mesh(
+                wingGeometry,
+                new THREE.MeshLambertMaterial({ color: 0xCCCCCC })
+            );
+            wing.position.y = -0.2;
+            aircraft.object.add(wing);
+            
+            // Tail
+            const tailGeometry = new THREE.BoxGeometry(4, 0.5, 1.5);
+            const tail = new THREE.Mesh(
+                tailGeometry,
+                new THREE.MeshLambertMaterial({ color: 0xCCCCCC })
+            );
+            tail.position.z = 5;
+            tail.position.y = 1;
+            aircraft.object.add(tail);
+            
+            // Vertical stabilizer
+            const vsGeometry = new THREE.BoxGeometry(0.5, 2.5, 3);
+            const vs = new THREE.Mesh(
+                vsGeometry,
+                new THREE.MeshLambertMaterial({ color: 0xCCCCCC })
+            );
+            vs.position.z = 5;
+            vs.position.y = 2;
+            aircraft.object.add(vs);
+            
+            // Set initial position
+            aircraft.object.position.set(0, 1000, 0);
+            scene.add(aircraft.object);
+            
+            // Add a camera mount slightly above and behind the aircraft
+            const cameraMount = new THREE.Object3D();
+            cameraMount.position.set(0, 2, 10);
+            aircraft.object.add(cameraMount);
+            
+            // Make the camera a child of the mount
+            cameraMount.add(camera);
+        }
+        
+        // Create noise generator for terrain
+        const terrainNoise = new SimplexNoise();
+        
+        // Terrain chunk manager
+        const terrainManager = {
+            chunkSize: 1000,  // Size of each terrain chunk
+            viewDistance: 3,  // Number of chunks visible in each direction
+            chunks: {},       // Map of active chunks
+            treeChunks: {},   // Map of active tree chunks
+            maxHeight: 800,   // Maximum terrain height
+            
+            // Get terrain height at a position
+            getTerrainHeight: function(x, z) {
+                // Use noise to generate continuous terrain regardless of chunks
+                const elevation = this.generateElevation(x, z);
+                return elevation * this.maxHeight;
+            },
+            
+            // Generate terrain elevation at a position (0-1)
+            generateElevation: function(x, z) {
+                // Multiple octaves of noise for more natural terrain
+                let elevation = 0;
+                elevation += terrainNoise.noise2D(x * 0.0002, z * 0.0002) * 0.5;
+                elevation += terrainNoise.noise2D(x * 0.0005, z * 0.0005) * 0.3;
+                elevation += terrainNoise.noise2D(x * 0.001, z * 0.001) * 0.2;
+                
+                // Map from -1:1 to 0:1
+                elevation = (elevation + 1) / 2;
+                
+                return elevation;
+            },
+            
+            // Generate a key for a chunk based on its coordinates
+            getChunkKey: function(chunkX, chunkZ) {
+                return `${chunkX},${chunkZ}`;
+            },
+            
+            // Get the chunk coordinates for a world position
+            getChunkCoords: function(x, z) {
+                const chunkX = Math.floor(x / this.chunkSize);
+                const chunkZ = Math.floor(z / this.chunkSize);
+                return { chunkX, chunkZ };
+            },
+            
+            // Create a terrain chunk
+            createChunk: function(chunkX, chunkZ) {
+                const key = this.getChunkKey(chunkX, chunkZ);
+                
+                // Return existing chunk if already created
+                if (this.chunks[key]) {
+                    return this.chunks[key];
+                }
+                
+                // Chunk world position
+                const worldX = chunkX * this.chunkSize;
+                const worldZ = chunkZ * this.chunkSize;
+                
+                // Create geometry
+                const geometry = new THREE.PlaneGeometry(
+                    this.chunkSize, 
+                    this.chunkSize, 
+                    32, 32
+                );
+                geometry.rotateX(-Math.PI / 2); // Make it horizontal
+                
+                // Get vertices and set heights
+                const vertices = geometry.attributes.position.array;
+                for (let i = 0; i < vertices.length; i += 3) {
+                    const vx = vertices[i] + worldX;
+                    const vz = vertices[i + 2] + worldZ;
+                    
+                    // Set height based on noise
+                    vertices[i + 1] = this.getTerrainHeight(vx, vz);
+                }
+                
+                // Update normals for lighting
+                geometry.computeVertexNormals();
+                
+                // Create material
+                const material = new THREE.MeshLambertMaterial({
+                    color: 0x228b22, // Forest green
+                    flatShading: false,
+                });
+                
+                // Create mesh and position it
+                const mesh = new THREE.Mesh(geometry, material);
+                mesh.position.set(worldX, 0, worldZ);
+                
+                // Add to scene and store in chunks map
+                scene.add(mesh);
+                this.chunks[key] = mesh;
+                
+                return mesh;
+            },
+            
+            // Create trees for a chunk
+            createTreesForChunk: function(chunkX, chunkZ) {
+                const key = this.getChunkKey(chunkX, chunkZ);
+                
+                // Return if already created
+                if (this.treeChunks[key]) {
+                    return;
+                }
+                
+                // Chunk world position
+                const worldX = chunkX * this.chunkSize;
+                const worldZ = chunkZ * this.chunkSize;
+                
+                // Tree parameters
+                const treeCount = 100; // Trees per chunk
+                const treeSize = 30;
+                
+                // Create tree geometries
+                const trunkGeometry = new THREE.CylinderGeometry(2, 2, 10, 8);
+                const trunkMaterial = new THREE.MeshLambertMaterial({ color: 0x8B4513 });
+                
+                const foliageGeometry = new THREE.ConeGeometry(10, 25, 8);
+                const foliageMaterial = new THREE.MeshLambertMaterial({ color: 0x006400 });
+                
+                // Create tree group for this chunk
+                const treeGroup = new THREE.Group();
+                
+                for (let i = 0; i < treeCount; i++) {
+                    // Random position within chunk
+                    const x = worldX + Math.random() * this.chunkSize;
+                    const z = worldZ + Math.random() * this.chunkSize;
+                    
+                    // Get terrain height at this position
+                    const y = this.getTerrainHeight(x, z);
+                    
+                    // Only place trees below a certain elevation (not on mountain tops)
+                    if (y < this.maxHeight * 0.6) {
+                        const tree = new THREE.Group();
+                        
+                        // Create trunk
+                        const trunk = new THREE.Mesh(trunkGeometry, trunkMaterial);
+                        trunk.position.y = 5;
+                        tree.add(trunk);
+                        
+                        // Create foliage
+                        const foliage = new THREE.Mesh(foliageGeometry, foliageMaterial);
+                        foliage.position.y = 22.5;
+                        tree.add(foliage);
+                        
+                        // Position tree on terrain
+                        tree.position.set(x, y, z);
+                        tree.scale.set(treeSize/30, treeSize/30, treeSize/30);
+                        
+                        treeGroup.add(tree);
+                    }
+                }
+                
+                // Add to scene and store in map
+                scene.add(treeGroup);
+                this.treeChunks[key] = treeGroup;
+            },
+            
+            // Remove a chunk
+            removeChunk: function(chunkX, chunkZ) {
+                const key = this.getChunkKey(chunkX, chunkZ);
+                
+                // Remove terrain chunk
+                if (this.chunks[key]) {
+                    scene.remove(this.chunks[key]);
+                    this.chunks[key].geometry.dispose();
+                    delete this.chunks[key];
+                }
+                
+                // Remove tree chunk
+                if (this.treeChunks[key]) {
+                    scene.remove(this.treeChunks[key]);
+                    this.treeChunks[key].traverse(function(object) {
+                        if (object.geometry) object.geometry.dispose();
+                        if (object.material) object.material.dispose();
+                    });
+                    delete this.treeChunks[key];
+                }
+            },
+            
+            // Update chunks based on aircraft position
+            update: function(position) {
+                // Get current chunk coordinates
+                const { chunkX, chunkZ } = this.getChunkCoords(position.x, position.z);
+                
+                // Track which chunks should be active
+                const activeChunks = {};
+                
+                // Create visible chunks
+                for (let x = chunkX - this.viewDistance; x <= chunkX + this.viewDistance; x++) {
+                    for (let z = chunkZ - this.viewDistance; z <= chunkZ + this.viewDistance; z++) {
+                        const key = this.getChunkKey(x, z);
+                        activeChunks[key] = true;
+                        
+                        // Create terrain chunk if needed
+                        this.createChunk(x, z);
+                        
+                        // Create trees for chunk if needed
+                        this.createTreesForChunk(x, z);
+                    }
+                }
+                
+                // Remove chunks that are out of range
+                for (const key in this.chunks) {
+                    if (!activeChunks[key]) {
+                        const [x, z] = key.split(',').map(Number);
+                        this.removeChunk(x, z);
+                    }
+                }
+                
+                // Update HUD with chunk count
+                chunksElement.textContent = Object.keys(this.chunks).length;
+            }
+        };
+        
+        // Add skybox
+        function createSkybox() {
+            const size = 30000;
+            
+            // Create box geometry
+            const geometry = new THREE.BoxGeometry(size, size, size);
+            
+            // Load skybox textures (for simplicity, just use colors here)
+            const materials = [
+                new THREE.MeshBasicMaterial({ color: 0x4c86c6, side: THREE.BackSide }), // right
+                new THREE.MeshBasicMaterial({ color: 0x4c86c6, side: THREE.BackSide }), // left
+                new THREE.MeshBasicMaterial({ color: 0x2862a1, side: THREE.BackSide }), // top
+                new THREE.MeshBasicMaterial({ color: 0x7ab6f0, side: THREE.BackSide }), // bottom
+                new THREE.MeshBasicMaterial({ color: 0x4c86c6, side: THREE.BackSide }), // front
+                new THREE.MeshBasicMaterial({ color: 0x4c86c6, side: THREE.BackSide })  // back
+            ];
+            
+            // Create skybox mesh
+            const skybox = new THREE.Mesh(geometry, materials);
+            scene.add(skybox);
+        }
+        
+        // Add clouds
+        function addClouds() {
+            const cloudCount = 200;
+            const cloudGroup = new THREE.Group();
+            
+            for (let i = 0; i < cloudCount; i++) {
+                const cloudMaterial = new THREE.MeshLambertMaterial({
+                    color: 0xffffff,
+                    transparent: true, 
+                    opacity: 0.8
+                });
+                
+                // Create cloud (multiple spheres grouped together)
+                const cloud = new THREE.Group();
+                const size = 50 + Math.random() * 100;
+                
+                // Add 3-7 spheres to form a cloud
+                const sphereCount = 3 + Math.floor(Math.random() * 5);
+                for (let j = 0; j < sphereCount; j++) {
+                    const sphereSize = size * (0.5 + Math.random() * 0.5);
+                    const sphere = new THREE.Mesh(
+                        new THREE.SphereGeometry(sphereSize, 7, 7),
+                        cloudMaterial
+                    );
+                    
+                    // Position spheres relative to each other to form cloud shape
+                    sphere.position.set(
+                        (Math.random() - 0.5) * size,
+                        (Math.random() - 0.5) * size * 0.3,
+                        (Math.random() - 0.5) * size
+                    );
+                    
+                    cloud.add(sphere);
+                }
+                
+                // Position cloud in the sky
+                const x = (Math.random() - 0.5) * 10000;
+                const y = 1000 + Math.random() * 1000;
+                const z = (Math.random() - 0.5) * 10000;
+                cloud.position.set(x, y, z);
+                
+                cloudGroup.add(cloud);
+            }
+            
+            scene.add(cloudGroup);
+        }
+        
+        // Lighting
+        function setupLighting() {
+            // Main directional light (sun)
+            const sunLight = new THREE.DirectionalLight(0xffffcc, 1);
+            sunLight.position.set(1, 1, 0.5).normalize();
+            scene.add(sunLight);
+            
+            // Ambient light for shadow areas
+            const ambientLight = new THREE.AmbientLight(0x555555);
+            scene.add(ambientLight);
+        }
+        
+        // Control state
+        const keys = {};
+        
+        // Handle keyboard input
+        window.addEventListener('keydown', (e) => {
+            keys[e.key.toLowerCase()] = true;
+        });
+        
+        window.addEventListener('keyup', (e) => {
+            keys[e.key.toLowerCase()] = false;
+        });
+        
+        function processInput(deltaTime) {
+            // Convert to seconds
+            const dt = deltaTime / 1000;
+            
+            // Current rotation
+            const pitchRate = 1 * dt;
+            const rollRate = 1.5 * dt;
+            const yawRate = 0.7 * dt;
+            
+            // Extract current Euler angles
+            aircraft.eulerRotation.setFromRotationMatrix(aircraft.rotationMatrix);
+            
+            // Process inputs and update rotation
+            if (keys['w']) { // Pitch down (nose down)
+                aircraft.eulerRotation.x += pitchRate;
+            }
+            if (keys['s']) { // Pitch up (nose up)
+                aircraft.eulerRotation.x -= pitchRate;
+            }
+            if (keys['a']) { // Roll left
+                aircraft.eulerRotation.z += rollRate;
+            }
+            if (keys['d']) { // Roll right
+                aircraft.eulerRotation.z -= rollRate;
+            }
+            if (keys['q']) { // Yaw left
+                aircraft.eulerRotation.y += yawRate;
+            }
+            if (keys['e']) { // Yaw right
+                aircraft.eulerRotation.y -= yawRate;
+            }
+            if (keys['shift']) { // Increase speed
+                aircraft.speed = Math.min(aircraft.maxSpeed, aircraft.speed + 50 * dt);
+            }
+            if (keys['control']) { // Decrease speed
+                aircraft.speed = Math.max(aircraft.minSpeed, aircraft.speed - 50 * dt);
+            }
+            
+            // Clamp pitch to prevent complete flips
+            aircraft.eulerRotation.x = Math.max(-Math.PI/2, Math.min(Math.PI/2, aircraft.eulerRotation.x));
+            
+            // Update rotation matrix
+            aircraft.rotationMatrix.makeRotationFromEuler(aircraft.eulerRotation);
+        }
+        
+        // Initialize scene
+        function init() {
+            // Create aircraft model
+            createAircraftModel();
+            
+            // Create skybox
+            createSkybox();
+            
+            // Add clouds
+            addClouds();
+            
+            // Setup lighting
+            setupLighting();
+            
+            // Initialize terrain around starting position
+            terrainManager.update(aircraft.object.position);
+            
+            // Start animation loop
+            animate();
+        }
+        
+        let lastTime = 0;
+        
+        // Animation loop
+        function animate(timestamp) {
+            const deltaTime = lastTime ? timestamp - lastTime : 16.7; // Fallback to ~60fps
+            lastTime = timestamp;
+            
+            // Process user input
+            processInput(deltaTime);
+            
+            // Update aircraft physics
+            aircraft.update(deltaTime);
+            
+            // Render scene
+            renderer.render(scene, camera);
+            
+            // Continue animation loop
+            requestAnimationFrame(animate);
+        }
+        
+        // Start everything
+        init();
+    </script>
+</body>
+</html>
