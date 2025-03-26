@@ -451,7 +451,7 @@
                 for (let j = 0; j < sphereCount; j++) {
                     const sphereSize = size * (0.5 + Math.random() * 0.5);
                     const sphere = new THREE.Mesh(
-                        new THREE.SphereGeometry(sphereSize, 7, 7),
+                        new THREE.SphereGeometry(sphereSize, 15, 20),
                         cloudMaterial
                     );
                     
